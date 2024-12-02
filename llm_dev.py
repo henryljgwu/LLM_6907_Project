@@ -1,11 +1,13 @@
 # llm.py
 
 from openai import OpenAI
-from anthropic import Anthropic
+from anthropic import Anthropic, APIError, APIStatusError
 import os
 import json
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Callable
+import time
+from functools import wraps
 
 # 全局默认参数
 DEFAULT_MAX_TOKENS = 2500
@@ -49,6 +51,43 @@ MODEL_CONFIGS = {
         }
     }
 }
+
+
+def retry_on_server_error(max_retries: int = 3, delay: int = 30) -> Callable:
+    """
+    用于处理服务器错误的重试装饰器
+    
+    Args:
+        max_retries: 最大重试次数
+        delay: 重试等待时间(秒)
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except APIStatusError as e:
+                    if e.status_code in [500, 529]:
+                        retries += 1
+                        if retries < max_retries:
+                            print(f"Server error {e.status_code}, retrying in {delay}s (attempt {retries}/{max_retries})")
+                            time.sleep(delay)
+                            continue
+                    raise
+                except APIError as e:
+                    if "api_error" in str(e) or "overloaded_error" in str(e):
+                        retries += 1
+                        if retries < max_retries:
+                            print(f"API error: {str(e)}, retrying in {delay}s (attempt {retries}/{max_retries})")
+                            time.sleep(delay)
+                            continue
+                    raise
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
 
 class BaseLLM(ABC):
     """LLM基类，定义通用接口"""
@@ -216,6 +255,7 @@ class ClaudeLLM(BaseLLM):
             default_name = MODEL_CONFIGS['claude']['default']
             self.model = MODEL_CONFIGS['claude']['mapping'][default_name]
     
+    @retry_on_server_error(max_retries=3, delay=30)
     def generate_text(self, prompt: str, max_tokens: int = DEFAULT_MAX_TOKENS,
                      temperature: float = DEFAULT_TEMPERATURE) -> str:
         """
@@ -241,6 +281,7 @@ class ClaudeLLM(BaseLLM):
             print(f"Generated text: {text}")
         return text
 
+    @retry_on_server_error(max_retries=3, delay=30)
     def generate_json(self, prompt: str, schema: Dict, max_tokens: int = DEFAULT_MAX_TOKENS,
                      temperature: float = DEFAULT_TEMPERATURE) -> Optional[Dict]:
         """
